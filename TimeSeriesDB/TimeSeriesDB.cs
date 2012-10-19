@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
 using System.Text;
 using System.IO;
@@ -166,6 +167,44 @@ namespace TimeSeriesDB
 			return quotedata;
 		}
 
+		static List<QuoteData> ParseQuoteData(string filename, dynamic sortedquotedata)
+		{
+			List<QuoteData> quotedata = new List<QuoteData>();
+
+			using (StreamReader sr = new StreamReader(filename))
+			{
+				String line = null;
+				uint seqno = 1;
+				DateTime prevdt = DateTime.MinValue;
+				while ((line = sr.ReadLine()) != null)
+				{
+						QuoteData qd = new QuoteData(line);
+						if (qd.Dt.TimeOfDay >= WhenTimeIsBefore && qd.Dt.TimeOfDay <= WhenTimeIsAfter && qd.Bid != 0.0 && qd.Ask != 0.0 && qd.BidSz != 0 && qd.AskSz != 0 && qd.Bid <= qd.Ask && ExchangeInclusionList.Contains(qd.Exch))
+						{
+							if (qd.Dt.CompareTo(prevdt) != 0)
+								seqno = 1;
+							else
+								seqno++;
+							prevdt = qd.Dt;
+							TSDateTime tsdt = new TSDateTime(qd.Dt, MarketId, seqno); //GetSeqNo(qd.Dt, MarketId));
+//							lock (ProcessTickerQuoteFileLockObject)
+//							{
+							try
+							{
+								sortedquotedata.Enqueue(new { Key = tsdt, Value = qd });
+//							}
+							}
+					catch(Exception ex)
+					{
+						Console.WriteLine(ex.Message);
+						Console.WriteLine("Key={0}  Value={1}", tsdt.ToString(), qd.ToString());
+					}
+						}
+					}
+				}
+			return quotedata;
+		}
+
 		static List<TradeData> ParseTradeData(string filename)
 		{
 			List<TradeData> tradedata = new List<TradeData>();
@@ -209,7 +248,12 @@ namespace TimeSeriesDB
 				}
 			}
 			else
-				MarketToDt.Add(marketid, seq = new Dictionary<DateTime, uint>() { { dt, 1 } });
+			{
+				lock (GetSeqNoLockObject)
+				{
+					MarketToDt.Add(marketid, seq = new Dictionary<DateTime, uint>() { { dt, 1 } });
+				}
+			}
 			return seq[dt];
 		}
 		static int BinarySearchForMatch<T>(this IList<T> list, Func<T, int> comparer)
@@ -240,6 +284,16 @@ namespace TimeSeriesDB
 		static string MarketName = string.Empty;
 		static uint MarketId = 0;
 		static Random RandomGenerator = new Random(DateTime.Now.Millisecond);
+
+		public static ConcurrentQueue<T> CreateConcurrentQueue<T>(params T[] elements)
+		{
+			var queue = new ConcurrentQueue<T>(elements);
+			T y = default(T);
+			queue.TryDequeue(out y);
+			//			var list = new List<T>(elements);
+			//			list.Clear();
+			return queue;
+		}
 
 		public static List<T> CreateList<T>(params T[] elements)
 		{
@@ -288,10 +342,6 @@ namespace TimeSeriesDB
 					FilesSortedByMarket.Add(market, new List<string>() { file });
 			}
 
-			// list that contains sorted time series of trades and quotes for all markets
-			var sortedalltimeseries = new[] { new { TimeSeriesRecord = (TSRecord)null } }.ToList();
-			sortedalltimeseries.Clear();
-
 			// get quote files by market and process to build
 			// stream of best bid-offer
 			foreach (string markets in FilesSortedByMarket.Keys)
@@ -308,190 +358,230 @@ namespace TimeSeriesDB
 					}
 					List<string> files = FilesSortedByMarket[MarketName];
 
-					var sortedquotedata = CreateList(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
+//					var sortedquotedata = CreateList(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
+//					var sortedquotedata = CreateConcurrentQueue(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
 					// loop over all quotes files for the market and insert each quote into sortedquotedata
 					#region Process Ticker Quote Files
-					Parallel.ForEach(files.Where(x => x.Contains("_Q")), item => {
-						Console.WriteLine("\t\t{0}", item);
-						List<QuoteData> quotedata = ParseQuoteData(item);
-						foreach (QuoteData qd in quotedata)
-						{
-							lock (ProcessTickerQuoteFileLockObject)
-							{
-								sortedquotedata.Add(new { Key = new TSDateTime(qd.Dt, MarketId, GetSeqNo(qd.Dt, MarketId)), Value = qd });
-							}
-						}
-					});
-					#endregion
-					Console.WriteLine("\tSorting quotes");
-					sortedquotedata.Sort((p1, p2) => p1.Key.Timestamp.CompareTo(p2.Key.Timestamp));
-
-					MarketToDt.Clear();
-
-					#region Build Inside Quotes For Ticker
-					// we have sorted quotes for a market. now build stream of best bid-offer
-					var sortedbiddata = CreateList(new { Exch = string.Empty, Price = 0.0, Size = (uint)0 });
-					var sortedaskdata = CreateList(new { Exch = string.Empty, Price = 0.0, Size = (uint)0 });
-					var sortedquotes = CreateList(new { Dt = (ulong)0, Exch = string.Empty, Bid = 0.0, BidSz = (uint)0, Ask = 0.0, AskSz = (uint)0 });
-
-					string prevbidexch = string.Empty;
-					string prevaskexch = string.Empty;
-					double prevbidprice = 0.0;
-					double prevaskprice = 0.0;
-					uint prevbidsize = 0;
-					uint prevasksize = 0;
-					DateTime prevdt = DateTime.Now;
-
-					// walk sortedquotedata to compute inside market
-					// insert inside market records into sortedquotes
-					Console.WriteLine("\tBuilding inside market");
-					foreach (var qd in sortedquotedata)
+					Parallel.ForEach(files.Where(x => x.Contains("_Q")), new ParallelOptions() { MaxDegreeOfParallelism = 4 }, quotedatafile =>
 					{
-						bool newbiddata = true;
-						bool newaskdata = true;
+						Console.WriteLine("\t\t{0}", quotedatafile);
 
-						var mqqs = sortedbiddata.FirstOrDefault(x => x.Exch == qd.Value.BidExch);
-						if (mqqs == null)
-							sortedbiddata.Add(new { Exch = qd.Value.BidExch, Price = qd.Value.Bid, Size = qd.Value.BidSz });
-						else if (mqqs != null && (mqqs.Price != qd.Value.Bid || mqqs.Size != qd.Value.BidSz))
+						// list that contains sorted time series of trades and quotes for all markets
+						var sortedalltimeseries = CreateList(new { TimeSeriesRecord = (TSRecord)null });
+
+						string tradedatafile = quotedatafile.Replace("X_Q", "X_T");
+						if (!File.Exists(tradedatafile))
 						{
-							sortedbiddata.Remove(mqqs);
-							sortedbiddata.Add(new { Exch = qd.Value.BidExch, Price = qd.Value.Bid, Size = qd.Value.BidSz });
+							Console.WriteLine("\t\t\tTrade data file does not exist: {0}", tradedatafile);
+							return;
 						}
-						else
-							newbiddata = false;
 
-						mqqs = sortedaskdata.FirstOrDefault(x => x.Exch == qd.Value.AskExch);
-						if (mqqs == null)
-							sortedaskdata.Add(new { Exch = qd.Value.AskExch, Price = qd.Value.Ask, Size = qd.Value.AskSz });
-						else if (mqqs != null && (mqqs.Price != qd.Value.Ask || mqqs.Size != qd.Value.AskSz))
+						Dictionary<DateTime, uint> markettodt = new Dictionary<DateTime, uint>();
+						var sortedquotedata = CreateList(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
+						using (StreamReader sr = new StreamReader(quotedatafile))
 						{
-							sortedaskdata.Remove(mqqs);
-							sortedaskdata.Add(new { Exch = qd.Value.AskExch, Price = qd.Value.Ask, Size = qd.Value.AskSz });
-						}
-						else
-							newaskdata = false;
-
-						if (newbiddata)
-							sortedbiddata = sortedbiddata.OrderByDescending(x => x.Price).ThenByDescending(y => y.Size).ToList();
-						if (newaskdata)
-							sortedaskdata = sortedaskdata.OrderBy(x => x.Price).ThenByDescending(y => y.Size).ToList();
-
-						if (
-								((prevbidprice != sortedbiddata[0].Price) || (prevbidsize != sortedbiddata[0].Size)
-								|| (prevaskprice != sortedaskdata[0].Price) || (prevasksize != sortedaskdata[0].Size)
-							//						|| (prevbidexch != sortedbiddata[0].Exch) || (prevaskexch != sortedaskdata[0].Exch)
-								)
-								&&
-								(prevdt != qd.Value.Dt)
-							)
-						{
-							sortedquotes.Add(new { Dt = (ulong)new TSDateTime(qd.Key.Dt, qd.Key.MarketId, 0).Timestamp, Exch = sortedbiddata[0].Exch, Bid = (double)sortedbiddata[0].Price, BidSz = (uint)sortedbiddata[0].Size, Ask = (double)sortedaskdata[0].Price, AskSz = (uint)sortedaskdata[0].Size });
-							//						Console.WriteLine(string.Format("{0} {1}:{2}:{3} {4}:{5}:{6}", qd.Value.Dt.Ticks, sortedbiddata[0].Exch, sortedbiddata[0].Price, sortedbiddata[0].Size, sortedaskdata[0].Exch, sortedaskdata[0].Price, sortedaskdata[0].Size));
-							prevbidexch = sortedbiddata[0].Exch;
-							prevbidprice = sortedbiddata[0].Price;
-							prevbidsize = sortedbiddata[0].Size;
-							prevaskexch = sortedaskdata[0].Exch;
-							prevaskprice = sortedaskdata[0].Price;
-							prevasksize = sortedaskdata[0].Size;
-							prevdt = qd.Value.Dt;
-						}
-					}
-					Console.WriteLine("\tSorting inside market");
-					sortedquotes.Sort((p1, p2) => p1.Dt.CompareTo(p2.Dt));
-					sortedbiddata.Clear();
-					sortedaskdata.Clear();
-					sortedquotedata.Clear();
-					#endregion
-
-					#region Process Ticker Trades Files
-					var sortedtrades = CreateList(new { Key = (TSDateTime)null, Value = (TradeData)null });
-					MarketToDt[TimeSeriesDB.MarketId] = new Dictionary<DateTime, uint>();
-					if (sortedquotes.Count > 0)
-					{
-						Console.WriteLine("\tTrades", TimeSeriesDB.MarketName);
-						// need to process all trades files and create a sorted list of trades
-						Parallel.ForEach(files.Where(x => x.Contains("_T")), item =>
-						{
-							Console.WriteLine("\t\t{0}", item);
-							List<TradeData> tradedata = ParseTradeData(item);
-							foreach (TradeData td in tradedata)
+							String line = null;
+							while ((line = sr.ReadLine()) != null)
 							{
-								lock (ProcessTickerTradeFileLockObject)
+								QuoteData qd = new QuoteData(line);
+								if (qd.Dt.TimeOfDay >= WhenTimeIsBefore && qd.Dt.TimeOfDay <= WhenTimeIsAfter && qd.Bid != 0.0 && qd.Ask != 0.0 && qd.BidSz != 0 && qd.AskSz != 0 && qd.Bid <= qd.Ask && ExchangeInclusionList.Contains(qd.Exch))
 								{
-									sortedtrades.Add(new { Key = new TSDateTime(td.Dt, TimeSeriesDB.MarketId, GetSeqNo(td.Dt, TimeSeriesDB.MarketId)), Value = td });
+									uint seqno = 1;
+									if (markettodt.ContainsKey(qd.Dt))
+									{
+										seqno = markettodt[qd.Dt];
+										markettodt[qd.Dt] = seqno + 1;
+									}
+									else
+										markettodt[qd.Dt] = 1;
+									TSDateTime tsdt = new TSDateTime(qd.Dt, MarketId, seqno); //GetSeqNo(qd.Dt, MarketId));
+									sortedquotedata.Add(new { Key = new TSDateTime(qd.Dt, MarketId, seqno), Value = qd });
 								}
 							}
-						});
-					}
-					#endregion
-					Console.WriteLine("\tSorting trades");
-					sortedtrades.Sort((p1, p2) => p1.Key.Timestamp.CompareTo(p2.Key.Timestamp));
-
-					#region Build Interleaved Timeseries
-					var sortedtimeseries = CreateList(new { TimeSeriesRecord = (TSRecord)null });
-
-					ulong timestamp_msecs = 0;
-					ulong timestamp_quote = 0;
-					// loop over sortedtrades and create time series record 
-					Console.WriteLine("\tBuilding interleaved timeseries");
-					foreach (var x in sortedtrades)
-					{
-						if (10 * ((ulong)x.Key.Dt.Ticks) > timestamp_msecs)
-						{
-							// find nearest quote by timestamp
-							int index = BinarySearchForMatch(sortedquotes, (y) => { return y.Dt.CompareTo(x.Key.Timestamp); });
-							int idx = index == 0 ? 0 : index - 1;
-							var quote = sortedquotes[idx];
-							timestamp_quote = quote.Dt;
-							//						sortedtimeseries.Add(new { TimeSeriesRecord = new TimeSeriesRecord(quote.Dt, quote.Exch, quote.Bid, quote.BidSz, quote.Ask, quote.AskSz) });
-							timestamp_msecs = 10 * ((ulong)x.Key.Dt.Ticks);
 						}
-						sortedtimeseries.Add(new { TimeSeriesRecord = new TSRecord(x.Key.Timestamp, x.Value.Exch, x.Value.Price, x.Value.Volume) { QuoteIdx = timestamp_quote } });
-					}
-					sortedtrades.Clear();
-					foreach (var x in sortedquotes)
-						sortedtimeseries.Add(new { TimeSeriesRecord = new TSRecord(x.Dt, x.Exch, x.Bid, x.BidSz, x.Ask, x.AskSz) });
-					sortedquotes.Clear();
+//						List<QuoteData> quotedata = ParseQuoteData(item, sortedquotedata);
+						Console.WriteLine("\t\t\tSorting quotes for {0}", quotedatafile);
+						sortedquotedata.Sort((p1, p2) => p1.Key.Timestamp.CompareTo(p2.Key.Timestamp));
+						markettodt.Clear();
 
-					Console.WriteLine("\tSorting timeseries");
-					sortedtimeseries.Sort((p1, p2) => p1.TimeSeriesRecord.Idx.CompareTo(p2.TimeSeriesRecord.Idx));
+						#region Build Inside Quotes For Ticker
+						// we have sorted quotes for a market. now build stream of best bid-offer
+						var sortedbiddata = CreateList(new { Exch = string.Empty, Price = 0.0, Size = (uint)0 });
+						var sortedaskdata = CreateList(new { Exch = string.Empty, Price = 0.0, Size = (uint)0 });
+						var sortedquotes = CreateList(new { Dt = (ulong)0, Exch = string.Empty, Bid = 0.0, BidSz = (uint)0, Ask = 0.0, AskSz = (uint)0 });
+
+						string prevbidexch = string.Empty;
+						string prevaskexch = string.Empty;
+						double prevbidprice = 0.0;
+						double prevaskprice = 0.0;
+						uint prevbidsize = 0;
+						uint prevasksize = 0;
+						DateTime prevdt = DateTime.Now;
+
+						// walk sortedquotedata to compute inside market
+						// insert inside market records into sortedquotes
+						Console.WriteLine("\t\t\tBuilding inside market for {0}", quotedatafile);
+						foreach (var qd in sortedquotedata)
+						{
+							bool newbiddata = true;
+							bool newaskdata = true;
+
+							var mqqs = sortedbiddata.FirstOrDefault(x => x.Exch == qd.Value.BidExch);
+							if (mqqs == null)
+								sortedbiddata.Add(new { Exch = qd.Value.BidExch, Price = qd.Value.Bid, Size = qd.Value.BidSz });
+							else if (mqqs != null && (mqqs.Price != qd.Value.Bid || mqqs.Size != qd.Value.BidSz))
+							{
+								sortedbiddata.Remove(mqqs);
+								sortedbiddata.Add(new { Exch = qd.Value.BidExch, Price = qd.Value.Bid, Size = qd.Value.BidSz });
+							}
+							else
+								newbiddata = false;
+
+							mqqs = sortedaskdata.FirstOrDefault(x => x.Exch == qd.Value.AskExch);
+							if (mqqs == null)
+								sortedaskdata.Add(new { Exch = qd.Value.AskExch, Price = qd.Value.Ask, Size = qd.Value.AskSz });
+							else if (mqqs != null && (mqqs.Price != qd.Value.Ask || mqqs.Size != qd.Value.AskSz))
+							{
+								sortedaskdata.Remove(mqqs);
+								sortedaskdata.Add(new { Exch = qd.Value.AskExch, Price = qd.Value.Ask, Size = qd.Value.AskSz });
+							}
+							else
+								newaskdata = false;
+
+							if (newbiddata)
+								sortedbiddata = sortedbiddata.OrderByDescending(x => x.Price).ThenByDescending(y => y.Size).ToList();
+							if (newaskdata)
+								sortedaskdata = sortedaskdata.OrderBy(x => x.Price).ThenByDescending(y => y.Size).ToList();
+
+							if (
+									((prevbidprice != sortedbiddata[0].Price) || (prevbidsize != sortedbiddata[0].Size)
+									|| (prevaskprice != sortedaskdata[0].Price) || (prevasksize != sortedaskdata[0].Size)
+								//						|| (prevbidexch != sortedbiddata[0].Exch) || (prevaskexch != sortedaskdata[0].Exch)
+									)
+									&&
+									(prevdt != qd.Value.Dt)
+								)
+							{
+								sortedquotes.Add(new { Dt = (ulong)new TSDateTime(qd.Key.Dt, qd.Key.MarketId, 0).Timestamp, Exch = sortedbiddata[0].Exch, Bid = (double)sortedbiddata[0].Price, BidSz = (uint)sortedbiddata[0].Size, Ask = (double)sortedaskdata[0].Price, AskSz = (uint)sortedaskdata[0].Size });
+								//						Console.WriteLine(string.Format("{0} {1}:{2}:{3} {4}:{5}:{6}", qd.Value.Dt.Ticks, sortedbiddata[0].Exch, sortedbiddata[0].Price, sortedbiddata[0].Size, sortedaskdata[0].Exch, sortedaskdata[0].Price, sortedaskdata[0].Size));
+								prevbidexch = sortedbiddata[0].Exch;
+								prevbidprice = sortedbiddata[0].Price;
+								prevbidsize = sortedbiddata[0].Size;
+								prevaskexch = sortedaskdata[0].Exch;
+								prevaskprice = sortedaskdata[0].Price;
+								prevasksize = sortedaskdata[0].Size;
+								prevdt = qd.Value.Dt;
+							}
+						}
+						Console.WriteLine("\t\t\tSorting inside market for {0}", quotedatafile);
+						sortedquotes.Sort((p1, p2) => p1.Dt.CompareTo(p2.Dt));
+						sortedbiddata.Clear();
+						sortedaskdata.Clear();
+						sortedquotedata.Clear();
+						#endregion
+
+						#region Process Ticker Trades Files
+						var sortedtrades = CreateList(new { Key = (TSDateTime)null, Value = (TradeData)null });
+						if (sortedquotes.Count > 0)
+						{
+							using (StreamReader sr = new StreamReader(tradedatafile))
+							{
+								String line = null;
+								while ((line = sr.ReadLine()) != null)
+								{
+									try
+									{
+										TradeData td = new TradeData(line);
+										uint seqno = 1;
+										if (markettodt.ContainsKey(td.Dt))
+										{
+											seqno = markettodt[td.Dt];
+											markettodt[td.Dt] = seqno + 1;
+										}
+										else
+											markettodt[td.Dt] = 1;
+										if (td.Dt.TimeOfDay >= WhenTimeIsBefore && td.Dt.TimeOfDay <= WhenTimeIsAfter && td.Price > 0.0 && td.Volume > 0 && ExchangeInclusionList.Contains(td.Exch))
+											sortedtrades.Add(new { Key = new TSDateTime(td.Dt, TimeSeriesDB.MarketId, seqno), Value = td });
+									}
+									catch
+									{
+									}
+								}
+							}
+							// need to process all trades files and create a sorted list of trades
+							Console.WriteLine("\t\t{0}", tradedatafile);
+						}
+						#endregion
+						Console.WriteLine("\tSorting trades");
+						sortedtrades.Sort((p1, p2) => p1.Key.Timestamp.CompareTo(p2.Key.Timestamp));
+
+						#region Build Interleaved Timeseries
+						var sortedtimeseries = CreateList(new { TimeSeriesRecord = (TSRecord)null });
+
+						ulong timestamp_msecs = 0;
+						ulong timestamp_quote = 0;
+						// loop over sortedtrades and create time series record 
+						Console.WriteLine("\tBuilding interleaved timeseries");
+						foreach (var x in sortedtrades)
+						{
+							if (10 * ((ulong)x.Key.Dt.Ticks) > timestamp_msecs)
+							{
+								// find nearest quote by timestamp
+								int index = BinarySearchForMatch(sortedquotes, (y) => { return y.Dt.CompareTo(x.Key.Timestamp); });
+								int idx = index == 0 ? 0 : index - 1;
+								var quote = sortedquotes[idx];
+								timestamp_quote = quote.Dt;
+								timestamp_msecs = 10 * ((ulong)x.Key.Dt.Ticks);
+							}
+							sortedtimeseries.Add(new { TimeSeriesRecord = new TSRecord(x.Key.Timestamp, x.Value.Exch, x.Value.Price, x.Value.Volume) { QuoteIdx = timestamp_quote } });
+						}
+						sortedtrades.Clear();
+						foreach (var x in sortedquotes)
+							sortedtimeseries.Add(new { TimeSeriesRecord = new TSRecord(x.Dt, x.Exch, x.Bid, x.BidSz, x.Ask, x.AskSz) });
+						sortedquotes.Clear();
+
+						Console.WriteLine("\tSorting timeseries");
+						sortedtimeseries.Sort((p1, p2) => p1.TimeSeriesRecord.Idx.CompareTo(p2.TimeSeriesRecord.Idx));
+						#endregion
+
+						Console.WriteLine("\tAdding {0} timeseries to master timeseries", TimeSeriesDB.MarketName);
+						sortedalltimeseries.AddRange(sortedtimeseries);
+
+						Console.WriteLine("\tSorting master timeseries");
+						sortedalltimeseries.Sort((p1, p2) => p1.TimeSeriesRecord.Idx.CompareTo(p2.TimeSeriesRecord.Idx));
+
+						#region Write To Timeseries DB
+						if (sortedalltimeseries.Count > 0)
+						{
+							string filename = string.Format(@"{0}\{1}", dbdirectory, Path.GetFileName(quotedatafile).Replace("_Q", "_TSDB").Replace("asc", "dts")); //new TSDateTime(sortedalltimeseries[0].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"), new TSDateTime(sortedalltimeseries[sortedalltimeseries.Count - 1].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"));
+
+							if (File.Exists(filename))
+								File.Delete(filename);
+
+							using (var file = new BinCompressedSeriesFile<ulong, TSRecord>(filename))
+							{
+								var root = (ComplexField)file.RootField;
+								((ScaledDeltaFloatField)root["Bid"].Field).Multiplier = 1000;
+								((ScaledDeltaFloatField)root["Ask"].Field).Multiplier = 1000;
+
+								file.UniqueIndexes = false; // enforces index uniqueness
+								file.InitializeNewFile(); // create file and write header
+
+								List<TSRecord> tsrlist = new List<TSRecord>();
+								foreach (var tsr in sortedalltimeseries)
+									tsrlist.Add(tsr.TimeSeriesRecord);
+
+								ArraySegment<TSRecord> arr = new ArraySegment<TSRecord>(tsrlist.ToArray());
+								file.AppendData(new ArraySegment<TSRecord>[] { arr });
+							}
+						}
+						#endregion
+					});
 					#endregion
-
-					Console.WriteLine("\tAdding {0} timeseries to master timeseries", TimeSeriesDB.MarketName);
-					sortedalltimeseries.AddRange(sortedtimeseries);
 				#endregion
 				}
 			}
-			Console.WriteLine("\tSorting master timeseries");
-			sortedalltimeseries.Sort((p1, p2) => p1.TimeSeriesRecord.Idx.CompareTo(p2.TimeSeriesRecord.Idx));
 
-			#region Write To Timeseries DB
-			if (sortedalltimeseries.Count > 0)
-			{
-				string filename = string.Format(@"{0}\tsdb_{1}_{1}.dts", dbdirectory, new TSDateTime(sortedalltimeseries[0].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"), new TSDateTime(sortedalltimeseries[sortedalltimeseries.Count - 1].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"));
-
-				if (File.Exists(filename))
-					File.Delete(filename);
-
-				using (var file = new BinCompressedSeriesFile<ulong, TSRecord>(filename))
-				{
-					var root = (ComplexField)file.RootField;
-					((ScaledDeltaFloatField)root["Bid"].Field).Multiplier = 1000;
-					((ScaledDeltaFloatField)root["Ask"].Field).Multiplier = 1000;
-
-					file.UniqueIndexes = false; // enforces index uniqueness
-					file.InitializeNewFile(); // create file and write header
-
-					List<TSRecord> tsrlist = new List<TSRecord>();
-					foreach (var tsr in sortedalltimeseries)
-						tsrlist.Add(tsr.TimeSeriesRecord);
-
-					ArraySegment<TSRecord> arr = new ArraySegment<TSRecord>(tsrlist.ToArray());
-					file.AppendData(new ArraySegment<TSRecord>[] { arr });
-				}
-			}
-			#endregion
 			Console.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss.fff"));
 		}
 	}
