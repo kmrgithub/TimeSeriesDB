@@ -32,7 +32,8 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="NYurik.TimeSeriesDb">
+    <Reference Include="NYurik.TimeSeriesDb, Version=1.151.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
       <HintPath>..\packages\NYurik.TimeSeriesDb.1.151.0.0\lib\net40-Client\NYurik.TimeSeriesDb.dll</HintPath>
     </Reference>
     <Reference Include="System" />

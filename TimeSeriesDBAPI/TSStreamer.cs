@@ -9,19 +9,41 @@ using NYurik.TimeSeriesDb.Serializers.BlockSerializer;
 
 namespace TimeSeriesDBAPI
 {
-	public class TSStreamer
+	public class TSStreamer : IDisposable
 	{
 		private static readonly int MaxStreamValues = 1000000;
 		private string Filename { get; set; }
-		private IEnumerableFeed<ulong, TSRecord> TimeSeriesDB { get; set; }
+		public BinCompressedSeriesFile<ulong, TSRecord> TimeSeriesDB { get; set; }
+//		public IEnumerableFeed<ulong, TSRecord> TimeSeriesDB { get; set; }
 		public bool MoreData { get; private set; }
 		private DateTime LastDt { get; set; }
 		private DateTime EndDt { get; set; }
+		private bool _isDisposed;
+
+		public void Dispose()
+		{
+			Dispose(true);
+			GC.SuppressFinalize(this);
+		}
+
+		public void Dispose(bool disposing)
+		{
+			if (!_isDisposed)
+			{
+				if (disposing)
+					this.TimeSeriesDB.Close();
+				else
+					this.TimeSeriesDB = null;
+
+				_isDisposed = true;
+			}
+		}
 
 		public TSStreamer(string filename)
 		{
 			this.Filename = filename;
-			this.TimeSeriesDB = null;
+			this.TimeSeriesDB = (BinCompressedSeriesFile<ulong, TSRecord>)BinaryFile.Open(this.Filename, false);
+//			this.TimeSeriesDB = (IEnumerableFeed<ulong, TSRecord>)BinaryFile.Open(this.Filename, false);
 			this.LastDt = DateTime.MinValue;
 			this.EndDt = DateTime.MinValue;
 			this.MoreData = false;
@@ -57,7 +79,6 @@ namespace TimeSeriesDBAPI
 				this.MoreData = false;
 
 			ulong idx = 0;
-			this.TimeSeriesDB = (IEnumerableFeed<ulong, TSRecord>)BinaryFile.Open(this.Filename, false);
 			foreach (TSRecord val in this.TimeSeriesDB.Stream(new TSDateTime(this.LastDt, 0, 0).Timestamp, new TSDateTime(this.EndDt.AddMilliseconds(1), 0, 0).Timestamp))
 			{
 				if ((timeseries.Count >= TSStreamer.MaxStreamValues) && (100000 * (val.Idx / 100000) > idx))

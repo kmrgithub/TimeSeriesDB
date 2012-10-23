@@ -23,7 +23,7 @@ namespace TimeSeriesDB
 		private static readonly List<string> ExchangeExclusionList = new List<string>() { "Y" };
 		private static readonly TimeSpan WhenTimeIsBefore = new TimeSpan(9, 30, 0);
 		private static readonly TimeSpan WhenTimeIsAfter = new TimeSpan(16, 0, 0);
-		static Dictionary<string, uint> NameToMarketId = new Dictionary<string, uint>() { { "DOW", 1 }, { "DAN", 2 }, { "CLF", 3 }, { "AIG", 4 } };
+		static Dictionary<string, uint> NameToMarketId = new Dictionary<string, uint>() { { "DOW", 1 }, { "DAN", 2 }, { "CLF", 3 }, { "AIG", 4 }, {"SPY", 5} };
 
 		enum DataType { Quote, Trade };
 
@@ -145,117 +145,6 @@ namespace TimeSeriesDB
 			}
 		}
 
-		static List<QuoteData> ParseQuoteData(string filename)
-		{
-			List<QuoteData> quotedata = new List<QuoteData>();
-			using (StreamReader sr = new StreamReader(filename))
-			{
-				String line = null;
-				while ((line = sr.ReadLine()) != null)
-				{
-					try
-					{
-						QuoteData qd = new QuoteData(line);
-						if (qd.Dt.TimeOfDay >= WhenTimeIsBefore && qd.Dt.TimeOfDay <= WhenTimeIsAfter && qd.Bid != 0.0 && qd.Ask != 0.0 && qd.BidSz != 0 && qd.AskSz != 0 && qd.Bid <= qd.Ask && ExchangeInclusionList.Contains(qd.Exch))
-							quotedata.Add(qd);
-					}
-					catch
-					{
-					}
-				}
-			}
-			return quotedata;
-		}
-
-		static List<QuoteData> ParseQuoteData(string filename, dynamic sortedquotedata)
-		{
-			List<QuoteData> quotedata = new List<QuoteData>();
-
-			using (StreamReader sr = new StreamReader(filename))
-			{
-				String line = null;
-				uint seqno = 1;
-				DateTime prevdt = DateTime.MinValue;
-				while ((line = sr.ReadLine()) != null)
-				{
-						QuoteData qd = new QuoteData(line);
-						if (qd.Dt.TimeOfDay >= WhenTimeIsBefore && qd.Dt.TimeOfDay <= WhenTimeIsAfter && qd.Bid != 0.0 && qd.Ask != 0.0 && qd.BidSz != 0 && qd.AskSz != 0 && qd.Bid <= qd.Ask && ExchangeInclusionList.Contains(qd.Exch))
-						{
-							if (qd.Dt.CompareTo(prevdt) != 0)
-								seqno = 1;
-							else
-								seqno++;
-							prevdt = qd.Dt;
-							TSDateTime tsdt = new TSDateTime(qd.Dt, MarketId, seqno); //GetSeqNo(qd.Dt, MarketId));
-//							lock (ProcessTickerQuoteFileLockObject)
-//							{
-							try
-							{
-								sortedquotedata.Enqueue(new { Key = tsdt, Value = qd });
-//							}
-							}
-					catch(Exception ex)
-					{
-						Console.WriteLine(ex.Message);
-						Console.WriteLine("Key={0}  Value={1}", tsdt.ToString(), qd.ToString());
-					}
-						}
-					}
-				}
-			return quotedata;
-		}
-
-		static List<TradeData> ParseTradeData(string filename)
-		{
-			List<TradeData> tradedata = new List<TradeData>();
-			using (StreamReader sr = new StreamReader(filename))
-			{
-				String line = null;
-				while ((line = sr.ReadLine()) != null)
-				{
-					try
-					{
-						TradeData td = new TradeData(line);
-						if (td.Dt.TimeOfDay >= WhenTimeIsBefore && td.Dt.TimeOfDay <= WhenTimeIsAfter && td.Price > 0.0 && td.Volume > 0 && ExchangeInclusionList.Contains(td.Exch))
-							tradedata.Add(td);
-					}
-					catch
-					{
-					}
-				}
-			}
-			return tradedata;
-		}
-		static Dictionary<uint, Dictionary<DateTime, uint>> MarketToDt = new Dictionary<uint, Dictionary<DateTime, uint>>();
-		static object GetSeqNoLockObject = new object();
-		static uint GetSeqNo(DateTime dt, uint marketid)
-		{
-			Dictionary<DateTime, uint> seq = null;
-			if (MarketToDt.ContainsKey(marketid))
-			{
-				lock (GetSeqNoLockObject)
-				{
-					if (MarketToDt[marketid].ContainsKey(dt))
-					{
-						seq = MarketToDt[marketid];
-						seq[dt] = seq[dt] + 1;
-					}
-					else
-					{
-						MarketToDt[marketid].Add(dt, 1);
-						seq = MarketToDt[marketid];
-					}
-				}
-			}
-			else
-			{
-				lock (GetSeqNoLockObject)
-				{
-					MarketToDt.Add(marketid, seq = new Dictionary<DateTime, uint>() { { dt, 1 } });
-				}
-			}
-			return seq[dt];
-		}
 		static int BinarySearchForMatch<T>(this IList<T> list, Func<T, int> comparer)
 		{
 			int min = 0;
@@ -283,17 +172,6 @@ namespace TimeSeriesDB
 
 		static string MarketName = string.Empty;
 		static uint MarketId = 0;
-		static Random RandomGenerator = new Random(DateTime.Now.Millisecond);
-
-		public static ConcurrentQueue<T> CreateConcurrentQueue<T>(params T[] elements)
-		{
-			var queue = new ConcurrentQueue<T>(elements);
-			T y = default(T);
-			queue.TryDequeue(out y);
-			//			var list = new List<T>(elements);
-			//			list.Clear();
-			return queue;
-		}
 
 		public static List<T> CreateList<T>(params T[] elements)
 		{
@@ -302,12 +180,17 @@ namespace TimeSeriesDB
 			return list;
 		}
 
-		static object ProcessTickerTradeFileLockObject = new object();
-		static object ProcessTickerQuoteFileLockObject = new object();
+		public static IEnumerable<int> ForLoopBlock(int start, int end, int incr)
+		{
+			for (int i = start; i < end; i += incr)
+				yield return i;
+		}
+
 		static void Main(string[] args)
 		{
 			string sourcedirectory = string.Empty;
 			string dbdirectory = Directory.GetCurrentDirectory();
+			string fileextension = "asc";
 
 			for (int i = 0; i < args.Length; i++)
 			{
@@ -331,7 +214,7 @@ namespace TimeSeriesDB
 
 			Console.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss.fff"));
 			SortedList<string, List<string>> FilesSortedByMarket = new SortedList<string, List<string>>();
-			foreach (string file in System.IO.Directory.GetFiles(sourcedirectory, "*", SearchOption.AllDirectories))
+			foreach (string file in System.IO.Directory.GetFiles(sourcedirectory, "*." + fileextension, SearchOption.AllDirectories))
 			{
 				string fname = Path.GetFileNameWithoutExtension(file);
 				string[] fnameelems = fname.Split(new char[] { '_' });
@@ -358,11 +241,9 @@ namespace TimeSeriesDB
 					}
 					List<string> files = FilesSortedByMarket[MarketName];
 
-//					var sortedquotedata = CreateList(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
-//					var sortedquotedata = CreateConcurrentQueue(new { Key = (TSDateTime)null, Value = (QuoteData)null }); // new[] { new { Key = (TSDateTime)null, Value = (QuoteData)null } }.ToList();
 					// loop over all quotes files for the market and insert each quote into sortedquotedata
 					#region Process Ticker Quote Files
-					Parallel.ForEach(files.Where(x => x.Contains("_Q")), new ParallelOptions() { MaxDegreeOfParallelism = 4 }, quotedatafile =>
+					Parallel.ForEach(files.Where(x => x.Contains("_Q")), new ParallelOptions() { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, quotedatafile =>
 					{
 						Console.WriteLine("\t\t{0}", quotedatafile);
 
@@ -553,7 +434,7 @@ namespace TimeSeriesDB
 						#region Write To Timeseries DB
 						if (sortedalltimeseries.Count > 0)
 						{
-							string filename = string.Format(@"{0}\{1}", dbdirectory, Path.GetFileName(quotedatafile).Replace("_Q", "_TSDB").Replace("asc", "dts")); //new TSDateTime(sortedalltimeseries[0].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"), new TSDateTime(sortedalltimeseries[sortedalltimeseries.Count - 1].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"));
+							string filename = string.Format(@"{0}\{1}", dbdirectory, Path.GetFileName(quotedatafile).Replace("_Q", "_TSDB").Replace(fileextension, "dts")); //new TSDateTime(sortedalltimeseries[0].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"), new TSDateTime(sortedalltimeseries[sortedalltimeseries.Count - 1].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"));
 
 							if (File.Exists(filename))
 								File.Delete(filename);
@@ -578,11 +459,127 @@ namespace TimeSeriesDB
 						#endregion
 					});
 					#endregion
-				#endregion
 				}
+				#endregion
+
+				// merge files together
+				#region merge per day per tick ts files into a single per tick file
+				string mergedfilename = string.Format(@"{0}\{1}", dbdirectory, markets + ".dts"); //new TSDateTime(sortedalltimeseries[0].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"), new TSDateTime(sortedalltimeseries[sortedalltimeseries.Count - 1].TimeSeriesRecord.Idx).Dt.ToString("yyyyMMddHHmmssfff"));
+				if (File.Exists(mergedfilename))
+					File.Delete(mergedfilename);
+
+				List<string> filestobemerged = Directory.GetFiles(dbdirectory, markets + "*.dts").ToList();
+				do
+				{
+					var pairs = filestobemerged.Where((x, i) => i % 2 == 0).Zip(filestobemerged.Where((x, i) => i % 2 == 1), (second, first) => new[] { first, second }).ToList();
+					Parallel.ForEach(pairs, new ParallelOptions() { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, pair =>
+					{
+						string mergedfile = Path.GetTempFileName();
+						File.Copy(mergedfile, mergedfile = dbdirectory + "\\" + Path.GetFileName(mergedfile));
+						File.Delete(mergedfile);
+						string mergefile1 = pair[0];
+						string mergefile2 = pair[1];
+
+						List<TSDBEnumerator> sortedtsdbenumerators = new List<TSDBEnumerator>();
+						List<TSDBEnumerator> TSDBEnumerators = pair.Select(x => new TSDBEnumerator(new TSStreamer(x), new TSDateTime(DateTime.MinValue, 0, 0).Timestamp, new TSDateTime(DateTime.MaxValue, 999, 99).Timestamp)).ToList(); //.TimeSeriesDB.Stream(new TSDateTime(DateTime.MinValue, 0, 0).Timestamp, new TSDateTime(DateTime.MaxValue, 999, 99).Timestamp).GetEnumerator())).ToList();
+						using (var file = new BinCompressedSeriesFile<ulong, TSRecord>(mergedfile))
+						{
+							List<TSRecord> tsrlist = new List<TSRecord>();
+
+							var root = (ComplexField)file.RootField;
+							((ScaledDeltaFloatField)root["Bid"].Field).Multiplier = 1000;
+							((ScaledDeltaFloatField)root["Ask"].Field).Multiplier = 1000;
+
+							file.UniqueIndexes = false; // enforces index uniqueness
+							file.InitializeNewFile(); // create file and write header
+
+							sortedtsdbenumerators.AddRange(TSDBEnumerators.Select(x => x));
+							do
+							{
+								foreach (var tsdbenumerator in TSDBEnumerators.Where(x => x.GetNext == true && x.TSEnumerator != null))
+								{
+									tsdbenumerator.GetNext = false;
+									if (true == tsdbenumerator.TSEnumerator.MoveNext())
+									{
+										tsdbenumerator.TSRecord = tsdbenumerator.TSEnumerator.Current;
+									}
+									else
+									{
+										tsdbenumerator.Dispose();
+										tsdbenumerator.TSEnumerator = null;
+										tsdbenumerator.TSRecord = null;
+										sortedtsdbenumerators.Remove(tsdbenumerator);
+									}
+								}
+								if (sortedtsdbenumerators.Count > 0)
+								{
+									sortedtsdbenumerators.Sort((item1, item2) => item1.TSRecord.Idx.CompareTo(item2.TSRecord.Idx));
+									sortedtsdbenumerators[0].GetNext = true;
+									tsrlist.Add(sortedtsdbenumerators[0].TSRecord);
+								}
+								if (tsrlist.Count == 10000000)
+								{
+									ArraySegment<TSRecord> arr = new ArraySegment<TSRecord>(tsrlist.ToArray());
+									file.AppendData(new ArraySegment<TSRecord>[] { arr });
+									tsrlist.Clear();
+								}
+							} while (sortedtsdbenumerators.Count > 0);
+							if (tsrlist.Count > 0)
+							{
+								ArraySegment<TSRecord> arr = new ArraySegment<TSRecord>(tsrlist.ToArray());
+								file.AppendData(new ArraySegment<TSRecord>[] { arr });
+							}
+						}
+						filestobemerged.Remove(mergefile1);
+						if (mergefile1.Contains(".tmp"))
+							File.Delete(mergefile1);
+						filestobemerged.Remove(mergefile2);
+						if (mergefile2.Contains(".tmp"))
+							File.Delete(mergefile2);
+						filestobemerged.Add(mergedfile);
+					});
+				} while (filestobemerged.Count > 1);
+				if (filestobemerged.Count == 1)
+					File.Move(filestobemerged[0], dbdirectory + "\\" + markets + ".dts");
+				#endregion
 			}
 
 			Console.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH-mm-ss.fff"));
+		}
+
+		private class TSDBEnumerator : IDisposable
+		{
+			public TSStreamer TSStreamer { get; set; }
+			public bool GetNext { get; set; }
+			public TSRecord TSRecord { get; set; }
+			public IEnumerator<TSRecord> TSEnumerator { get; set; }
+			private bool _isDisposed = false;
+			public TSDBEnumerator(TSStreamer tssstreamer, ulong minval, ulong maxval)
+			{
+				this.TSStreamer = tssstreamer;
+				this.GetNext = true;
+				this.TSRecord = null;
+				this.TSEnumerator = this.TSStreamer.TimeSeriesDB.Stream(minval, maxval).GetEnumerator();
+			}
+
+			public void Dispose()
+			{
+				Dispose(true);
+				GC.SuppressFinalize(this);
+			}
+
+			public void Dispose(bool disposing)
+			{
+				if (!_isDisposed)
+				{
+					if (disposing)
+						this.TSStreamer.Dispose();
+					this.TSStreamer = null;
+
+					_isDisposed = true;
+				}
+			}
+
 		}
 	}
 }
